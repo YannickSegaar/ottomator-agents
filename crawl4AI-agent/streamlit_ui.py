@@ -22,8 +22,8 @@ from pydantic_ai.messages import (
     RetryPromptPart,
     ModelMessagesTypeAdapter
 )
-# Import the MCP expert agent
-from mcp_expert import mcp_expert, MCPDeps
+# Import the Roberts Hawaii expert agent
+from robertshawaii_expert import robertshawaii_expert, RobertsHawaiiDeps
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -72,13 +72,13 @@ async def run_agent_with_streaming(user_input: str):
     while maintaining the entire conversation in `st.session_state.messages`.
     """
     # Prepare dependencies
-    deps = MCPDeps(
+    deps = RobertsHawaiiDeps(
         supabase=supabase,
         openai_client=openai_client
     )
 
     # Run the agent in a stream
-    async with mcp_expert.run_stream(
+    async with robertshawaii_expert.run_stream(
         user_input,
         deps=deps,
         message_history= st.session_state.messages[:-1],  # pass entire conversation so far
@@ -106,8 +106,8 @@ async def run_agent_with_streaming(user_input: str):
 
 
 async def main():
-    st.title("Model Context Protocol (MCP) Expert")
-    st.write("Ask any question about the Model Context Protocol (MCP), its specifications, implementation details, or best practices.")
+    st.title("Roberts Hawaii Expert")
+    st.write("Ask any question about Roberts Hawaii, its tours, or its services.")
 
     # Initialize chat history in session state if not present
     if "messages" not in st.session_state:
@@ -122,7 +122,7 @@ async def main():
                 display_message_part(part)
 
     # Chat input for the user
-    user_input = st.chat_input("What questions do you have about the Model Context Protocol?")
+    user_input = st.chat_input("What questions do you have about Roberts Hawaii?")
 
     if user_input:
         # We append a new request to the conversation explicitly
