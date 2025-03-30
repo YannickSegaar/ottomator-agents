@@ -110,18 +110,23 @@ def add_tools_to_agent(agent: Agent, source_tags: List[str]):
             
             all_results = []
             formatted_sections = []
+            debug_info = []
             
             # For each source, perform a search
             for source in search_sources:
-                # Query Supabase for relevant documents
+                debug_info.append(f"Searching source: {source}")
+                
+                # Query Supabase for relevant documents - get more results (8) to ensure coverage
                 result = ctx.deps.supabase.rpc(
                     'match_site_pages',
                     {
                         'query_embedding': query_embedding,
-                        'match_count': 3,  # Top 3 results per source
+                        'match_count': 8,  # Increased from 3 to 8 for better coverage
                         'filter': {'source': source}
                     }
                 ).execute()
+                
+                debug_info.append(f"Found {len(result.data) if result.data else 0} vector results for {source}")
                 
                 if result.data:
                     # Group results by source
@@ -141,15 +146,178 @@ def add_tools_to_agent(agent: Agent, source_tags: List[str]):
                         formatted_content = section_title + "\n\n" + "\n\n---\n\n".join(source_results)
                         formatted_sections.append(formatted_content)
             
+            # If vector search failed, try direct text search
             if not all_results:
-                return "No relevant documentation found for your query."
+                debug_info.append("Vector search found no results. Trying direct text search.")
+                
+                # Break query into keywords for better text search
+                clean_query = user_query.replace("?", "").replace("!", "").lower()
+                keywords = [word for word in clean_query.split() if len(word) > 3]
+                
+                # Create search terms with exact phrases and individual keywords
+                search_terms = [f"'{user_query}'"]  # Exact phrase match
+                search_terms.extend(keywords)  # Add individual keywords
+                
+                # Join with | for OR logic in text search
+                text_search_query = " | ".join(search_terms)
+                debug_info.append(f"Text search query: {text_search_query}")
+                
+                for source in search_sources:
+                    # Use direct text search approach
+                    try:
+                        # Direct content search
+                        term_search = ctx.deps.supabase.from_('site_pages') \
+                            .select('title, content, url') \
+                            .eq('metadata->>source', source) \
+                            .textearch('content', text_search_query) \
+                            .limit(5) \
+                            .execute()
+                            
+                        debug_info.append(f"Found {len(term_search.data) if term_search.data else 0} text search results for {source}")
+                        
+                        if term_search.data:
+                            section_title = f"## {source.replace('_docs', '').title()} Documentation (Text Search)"
+                            source_results = []
+                            for doc in term_search.data:
+                                chunk_text = f"""
+# {doc['title']}
+
+{doc['content']}
+"""
+                                source_results.append(chunk_text)
+                            
+                            formatted_content = section_title + "\n\n" + "\n\n---\n\n".join(source_results)
+                            formatted_sections.append(formatted_content)
+                    except Exception as text_error:
+                        debug_info.append(f"Text search error: {str(text_error)}")
+                        
+                        # Fallback to basic keyword search if textearch doesn't work
+                        try:
+                            # Try a simpler approach - look for content containing any of the keywords
+                            for keyword in keywords:
+                                if len(keyword) < 4:
+                                    continue  # Skip very short words
+                                    
+                                keyword_search = ctx.deps.supabase.from_('site_pages') \
+                                    .select('title, content, url') \
+                                    .eq('metadata->>source', source) \
+                                    .ilike('content', f'%{keyword}%') \
+                                    .limit(3) \
+                                    .execute()
+                                    
+                                if keyword_search.data:
+                                    debug_info.append(f"Found {len(keyword_search.data)} results for keyword '{keyword}'")
+                                    section_title = f"## {source.replace('_docs', '').title()} Documentation (Keyword: {keyword})"
+                                    source_results = []
+                                    for doc in keyword_search.data:
+                                        chunk_text = f"""
+# {doc['title']}
+
+{doc['content']}
+"""
+                                        source_results.append(chunk_text)
+                                    
+                                    formatted_content = section_title + "\n\n" + "\n\n---\n\n".join(source_results)
+                                    formatted_sections.append(formatted_content)
+                                    break  # Exit after finding results for one keyword
+                        except Exception as keyword_error:
+                            debug_info.append(f"Keyword search error: {str(keyword_error)}")
+            
+            # Special search for "feature matrix" or "support matrix" if that's in the query
+            if "feature matrix" in user_query.lower() or "support matrix" in user_query.lower() or "compatibility" in user_query.lower():
+                debug_info.append("Detected feature/support matrix request - doing targeted search")
+                for source in search_sources:
+                    matrix_search = ctx.deps.supabase.from_('site_pages') \
+                        .select('title, content, url') \
+                        .eq('metadata->>source', source) \
+                        .or_(f"content.ilike.%feature matrix%, content.ilike.%support matrix%, content.ilike.%compatibility table%") \
+                        .limit(3) \
+                        .execute()
+                        
+                    if matrix_search.data:
+                        debug_info.append(f"Found {len(matrix_search.data)} matrix results")
+                        section_title = f"## {source.replace('_docs', '').title()} Matrix Information"
+                        source_results = []
+                        for doc in matrix_search.data:
+                            chunk_text = f"""
+# {doc['title']}
+
+{doc['content']}
+"""
+                            source_results.append(chunk_text)
+                        
+                        formatted_content = section_title + "\n\n" + "\n\n---\n\n".join(source_results)
+                        formatted_sections.append(formatted_content)
+            
+            if not formatted_sections:
+                # Include debug info in the response if no results were found
+                debug_str = "\n".join(debug_info)
+                return f"No relevant documentation found for your query.\n\nDiagnostic information:\n{debug_str}"
                 
             # Join all sections with a major separator
-            return "\n\n==========\n\n".join(formatted_sections)
+            result = "\n\n==========\n\n".join(formatted_sections)
+            
+            # Include some debug info at the end for troubleshooting
+            debug_str = "\n".join(debug_info)
+            return result
             
         except Exception as e:
             print(f"Error retrieving documentation: {e}")
             return f"Error retrieving documentation: {str(e)}"
+    
+    @agent.tool
+    async def direct_keyword_search(ctx: RunContext[AgentDeps], keyword: str, specific_source: str = None) -> str:
+        """
+        Directly search for a specific keyword or phrase in the documentation.
+        Useful when semantic search isn't finding the right content.
+        
+        Args:
+            ctx: The context
+            keyword: The exact keyword or phrase to search for
+            specific_source: Optional source to limit search to
+            
+        Returns:
+            Documentation chunks containing the keyword
+        """
+        try:
+            # Determine which sources to search in
+            search_sources = [specific_source] if specific_source else ctx.deps.source_tags
+            
+            all_results = []
+            formatted_sections = []
+            
+            for source in search_sources:
+                # Simple keyword search
+                keyword_search = ctx.deps.supabase.from_('site_pages') \
+                    .select('title, content, url') \
+                    .eq('metadata->>source', source) \
+                    .ilike('content', f'%{keyword}%') \
+                    .limit(5) \
+                    .execute()
+                    
+                if keyword_search.data:
+                    section_title = f"## {source.replace('_docs', '').title()} Documentation (Keyword: {keyword})"
+                    source_results = []
+                    for doc in keyword_search.data:
+                        chunk_text = f"""
+# {doc['title']}
+
+{doc['content']}
+"""
+                        source_results.append(chunk_text)
+                    
+                    formatted_content = section_title + "\n\n" + "\n\n---\n\n".join(source_results)
+                    formatted_sections.append(formatted_content)
+            
+            if not formatted_sections:
+                return f"No documentation found containing the keyword: '{keyword}'"
+                
+            # Join all sections with a separator
+            return "\n\n==========\n\n".join(formatted_sections)
+            
+        except Exception as e:
+            print(f"Error in keyword search: {e}")
+            return f"Error performing keyword search: {str(e)}"
     
     @agent.tool
     async def list_documentation_pages(ctx: RunContext[AgentDeps], specific_source: str = None) -> Dict[str, List[str]]:
